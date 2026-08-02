@@ -1,0 +1,11 @@
+.venv/
+env/
+.vscode/
+__pycache__/
+*.pyc
+env/
+data/         
+chroma_db/
+chroma_db_langchain/
+.env
+test_langchain_simple.py
