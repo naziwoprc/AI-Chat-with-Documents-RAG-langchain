@@ -48,14 +48,24 @@ class RAGEngine:
         splits = splitter.split_documents(documents)
 
         # Embedding
-        embedding = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-
-        # Vector Store
-        vectorstore = Chroma.from_documents(
-            documents=splits, embedding=embedding, persist_directory=persist_dir
+        embedding = HuggingFaceEmbeddings(
+            model_name="all-MiniLM-L6-v2", encode_kwargs={"normalize_embeddings": True}
         )
 
-        self.retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+        # Vector Store
+        if os.path.exists(persist_dir):
+            self.vectorstore = Chroma(
+                persist_directory=persist_dir, embedding_function=embedding
+            )
+        else:
+            self.vectorstore = Chroma.from_documents(
+                documents=splits,
+                embedding=embedding,
+                persist_directory=persist_dir,
+                collection_metadata={"hnsw:space": "cosine"},
+            )
+
+        self.retriever = self.vectorstore.as_retriever(search_kwargs={"k": 3})
 
         # LLM
         self.llm = SimpleNvidiaLLM(api_key)
@@ -84,5 +94,30 @@ class RAGEngine:
     def format_docs(self, docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
-    def answer(self, question):
+    def answer(self, question, distance_threshold=0.6, margin_threshold=0.05):
+        results = self.vectorstore.similarity_search_with_score(question, k=3)
+
+        if not results:
+            return "I don't know."
+
+        best_doc, best_distance = results[0]
+
+        if best_distance > distance_threshold:
+            return "I don't know."
+
+        # margin
+        if len(results) > 1:
+            _, second_distance = results[1]
+            margin = second_distance - best_distance
+            if margin < margin_threshold:
+                return "I don't know."
+
         return self.chain.invoke(question)
+
+    def debug_retrieval(self, question, k=5):
+        results = self.vectorstore.similarity_search_with_score(question, k=k)
+
+        for rank, (doc, distance) in enumerate(results, start=1):
+            print(f"\nResult {rank}")
+            print("Distance:", distance)
+            print("Preview:", doc.page_content[:200])

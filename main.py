@@ -10,8 +10,9 @@ engine = RAGEngine(
     api_key=os.getenv("NVIDIA_API_KEY"),
 )
 
-question = input("Ask a question: ")
-answer = engine.answer(question)
+question = "Who won the World Cup in 2018?"
 
-print("\n---Answer---")
-print(answer)
+engine.debug_retrieval(question, k=5)
+print("\n--- Final Answer ---\n")
+print(engine.answer(question))
+print("\n--- End ---\n")
