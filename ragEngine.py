@@ -4,6 +4,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
+from sentence_transformers import CrossEncoder
 
 import os
 import requests
@@ -52,6 +53,8 @@ class RAGEngine:
             model_name="all-MiniLM-L6-v2", encode_kwargs={"normalize_embeddings": True}
         )
 
+        self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
+
         # Vector Store
         if os.path.exists(persist_dir):
             self.vectorstore = Chroma(
@@ -94,25 +97,53 @@ class RAGEngine:
     def format_docs(self, docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
-    def answer(self, question, distance_threshold=0.6, margin_threshold=0.05):
-        results = self.vectorstore.similarity_search_with_score(question, k=3)
+    def answer(
+        self,
+        question,
+        rerank_threshold=0.0,
+        rerank_margin_threshold=0.5,
+        embedding_margin_threshold=0.05,
+    ):
+        results = self.vectorstore.similarity_search_with_score(question, k=10)
 
         if not results:
             return "I don't know."
 
+        # -------- Stage 1: Embedding confidence --------
         best_doc, best_distance = results[0]
 
-        if best_distance > distance_threshold:
+        if len(results) > 1:
+            _, second_best_distance = results[1]
+            embedding_margin = second_best_distance - best_distance
+        else:
+            embedding_margin = 1.0
+
+        if embedding_margin > embedding_margin_threshold:
+            docs = [doc for doc, _ in results[:3]]
+            context = self.format_docs(docs)
+            formatted_prompt = self.prompt.format(context=context, input=question)
+            return self.llm.invoke(formatted_prompt)
+
+        # -------- Stage 2: Cross‑Encoder Rerank --------
+        reranked = self.rerank(question, results, top_k=3)
+
+        best_doc, best_score = reranked[0]
+
+        if best_score < rerank_threshold:
             return "I don't know."
 
-        # margin
-        if len(results) > 1:
-            _, second_distance = results[1]
-            margin = second_distance - best_distance
-            if margin < margin_threshold:
+        if len(reranked) > 1:
+            _, second_best_score = reranked[1]
+            rerank_margin = best_score - second_best_score
+
+            if rerank_margin < rerank_margin_threshold:
                 return "I don't know."
 
-        return self.chain.invoke(question)
+        docs = [doc for doc, _ in reranked]
+        context = self.format_docs(docs)
+        formatted_prompt = self.prompt.format(context=context, input=question)
+
+        return self.llm.invoke(formatted_prompt)
 
     def debug_retrieval(self, question, k=5):
         results = self.vectorstore.similarity_search_with_score(question, k=k)
@@ -121,3 +152,16 @@ class RAGEngine:
             print(f"\nResult {rank}")
             print("Distance:", distance)
             print("Preview:", doc.page_content[:200])
+
+    def rerank(self, question, docs_with_scores, top_k=3):
+        pairs = [(question, doc.page_content) for doc, _ in docs_with_scores]
+
+        scores = self.reranker.predict(pairs)
+
+        docs = [doc for doc, _ in docs_with_scores]
+
+        reranked = list(zip(docs, scores))
+
+        reranked.sort(key=lambda x: x[1], reverse=True)
+
+        return reranked[:top_k]
