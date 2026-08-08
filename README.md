@@ -1,42 +1,118 @@
 # AI Chat with Documents (RAG)
 
-A complete end-to-end Retrieval-Augmented Generation pipeline built from scratch.
+A production-ready Retrieval-Augmented Generation (RAG) system built from scratch and extended with FastAPI and Cross-Encoder reranking.
 
-## Project Stages
+---
 
-1. **Manual RAG Engine** (`rag_engine.py`)
-   - Persistent ChromaDB storage (`hnsw:space: cosine`)
-   - Token-based chunking with overlap
-   - Normalized embeddings + cosine similarity
-   - NVIDIA LLM integration via Dependency Injection
+## 🚀 Features
 
-2. **LangChain RAG v1** (`ragEngine.py` / `main.py`)
-   - LCEL pipeline (`prompt | retriever | llm`)
-   - Modular architecture with `LLMClient`
+### ✅ Core RAG Engine
 
-## Usage
+- Persistent Chroma vector store
+- Cosine similarity (`hnsw:space`)
+- Normalized embeddings
+- Token-aware retrieval tuning
+- Two-stage confidence gating
+- Cross-Encoder reranking (`ms-marco-MiniLM-L-6-v2`)
+- Source citation support
+
+### ✅ API Layer (FastAPI)
+
+- RESTful endpoint: `POST /ask`
+- Structured JSON responses
+- Request validation with Pydantic
+- Error handling with proper HTTP status codes
+- CLI mode for local testing
+
+---
+
+## 📁 Project Structure
+
+```
+ragEngine.py        # RAG core logic
+api.py              # FastAPI server
+main.py             # CLI testing mode
+Data/               # PDF documents
+chroma_db_langchain/ # Vector database (ignored in git)
+```
+
+---
+
+## 🛠 Usage
+
+### 1️⃣ Set Environment Variable
+
+Create `.env` file:
+
+```
+NVIDIA_API_KEY=your_api_key_here
+```
+
+---
+
+### 2️⃣ Run CLI Mode
 
 ```bash
-# 1. Set API key in .env
-NVIDIA_API_KEY=your_key_here
-
-# 2. Run manual RAG
-python rag_engine.py
-
-# 3. Run LangChain RAG
 python main.py
 ```
 
-## Requirements
+---
+
+### 3️⃣ Run API Server
+
+```bash
+python -m uvicorn api:app --reload
+```
+
+Open:
+
+```
+http://127.0.0.1:8000/docs
+```
+
+---
+
+## 📦 Requirements
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Key Learnings
+---
 
-- Embedding, Retrieval, and Generation must be separated
-- Chunking must be token-aware (not just characters)
-- Normalization + cosine metric improves retrieval quality
-- Dependency Injection makes LLM providers swappable
-- LangChain abstracts pipeline but hides scores/debug info
+## 🧠 Architecture Overview
+
+```
+Question
+   ↓
+Embedding Retrieval (k=10)
+   ↓
+Embedding Confidence Check
+   ↓
+Cross-Encoder Reranking
+   ↓
+Dynamic Margin Filtering
+   ↓
+LLM Generation
+   ↓
+Answer + Sources
+```
+
+---
+
+## 🎯 Engineering Highlights
+
+- Deterministic rejection using confidence thresholds
+- Adaptive retrieval based on score distribution
+- Production-ready REST API
+- Modular and versioned architecture
+- Separation of retrieval, ranking, and generation
+
+---
+
+## 📌 Versioning
+
+- `v1.0.0` – Manual RAG
+- `v1.1.0` – Margin-based confidence
+- `v1.2.0` – Cross-Encoder reranking
+- `v1.3.0` – FastAPI production API

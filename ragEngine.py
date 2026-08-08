@@ -29,8 +29,15 @@ class SimpleNvidiaLLM:
             "max_tokens": 500,
         }
 
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        if response.status_code != 200:
+            print("API Error:", response.text)
+            return "I don't know."
         data = response.json()
+
+        if "choices" not in data:
+            print("Unexpected Error:", data)
+            return "I don't know."
 
         return data["choices"][0]["message"]["content"]
 
@@ -109,6 +116,15 @@ class RAGEngine:
         if not results:
             return "I don't know."
 
+        distance = [distance for _, distance in results[:5]]
+
+        mean_distance = sum(distance) / len(distance)
+        std_distance = (
+            sum((d - mean_distance) ** 2 for d in distance) / len(distance)
+        ) ** 0.5
+
+        dynamic_margin_threshold = std_distance
+
         # -------- Stage 1: Embedding confidence --------
         best_doc, best_distance = results[0]
 
@@ -118,7 +134,7 @@ class RAGEngine:
         else:
             embedding_margin = 1.0
 
-        if embedding_margin > embedding_margin_threshold:
+        if embedding_margin > dynamic_margin_threshold:
             docs = [doc for doc, _ in results[:3]]
             context = self.format_docs(docs)
             formatted_prompt = self.prompt.format(context=context, input=question)
@@ -126,6 +142,15 @@ class RAGEngine:
 
         # -------- Stage 2: Cross‑Encoder Rerank --------
         reranked = self.rerank(question, results, top_k=3)
+
+        reranked_scores = [score for _, score in reranked]
+
+        mean_rerank = sum(reranked_scores) / len(reranked_scores)
+        std_rerank = (
+            sum((s - mean_rerank) ** 2 for s in reranked_scores) / len(reranked_scores)
+        ) ** 0.5
+
+        dynamic_rerank_margin_threshold = 0.5 * std_rerank
 
         best_doc, best_score = reranked[0]
 
@@ -136,14 +161,21 @@ class RAGEngine:
             _, second_best_score = reranked[1]
             rerank_margin = best_score - second_best_score
 
-            if rerank_margin < rerank_margin_threshold:
-                return "I don't know."
+            # if rerank_margin < dynamic_rerank_margin_threshold:
+            #     return "I don't know."
 
         docs = [doc for doc, _ in reranked]
         context = self.format_docs(docs)
         formatted_prompt = self.prompt.format(context=context, input=question)
 
-        return self.llm.invoke(formatted_prompt)
+        answer_text = self.llm.invoke(formatted_prompt)
+        pages = [doc.metadata["page"] for doc in docs]
+        unique_pages = sorted(set(pages))
+
+        sources = "\n".join(f"- Page {p}" for p in unique_pages)
+        final_output = f"{answer_text}\n\nSources:\n{sources}"
+
+        return final_output
 
     def debug_retrieval(self, question, k=5):
         results = self.vectorstore.similarity_search_with_score(question, k=k)
