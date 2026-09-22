@@ -42,15 +42,15 @@ async def ask_question(request: ChatRequest):
         result = engine.answer(request.question)
 
         if "Sources:" in result:
-            answer_text, sources_test = result.split("Sources:")
+            answer_text, sources_text = result.split("Sources:")
             sources = [
                 line.strip("- ").strip()
-                for line in sources_test.strip().split("\n")
+                for line in sources_text.strip().split("\n")
                 if line.strip()
             ]
         else:
             answer_text = result
             sources = []
-        return AnswerResponse(answer=answer_text.strip(), source=sources)
+        return AnswerResponse(answer=answer_text.strip(), sources=sources)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")

@@ -1,5 +1,5 @@
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from ingestion import load_documents, split_documents
+
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_core.prompts import ChatPromptTemplate
@@ -24,15 +24,27 @@ class SimpleNvidiaLLM:
 
         payload = {
             "model": "meta/llama-3.1-70b-instruct",
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
             "temperature": 0.0,
             "max_tokens": 500,
         }
 
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=120,
+        )
+
         if response.status_code != 200:
             print("API Error:", response.text)
             return "I don't know."
+
         data = response.json()
 
         if "choices" not in data:
@@ -47,25 +59,24 @@ class RAGEngine:
         self.pdf_path = pdf_path
         self.persist_dir = persist_dir
 
-        # Load PDF
-        loader = PyPDFLoader(pdf_path)
-        documents = loader.load()
-
-        # Split
-        splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
-        splits = splitter.split_documents(documents)
+        # Load and split documents
+        documents = load_documents(pdf_path)
+        splits = split_documents(documents)
 
         # Embedding
         embedding = HuggingFaceEmbeddings(
-            model_name="all-MiniLM-L6-v2", encode_kwargs={"normalize_embeddings": True}
+            model_name="all-MiniLM-L6-v2",
+            encode_kwargs={"normalize_embeddings": True},
         )
 
+        # Cross-Encoder reranker
         self.reranker = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
         # Vector Store
         if os.path.exists(persist_dir):
             self.vectorstore = Chroma(
-                persist_directory=persist_dir, embedding_function=embedding
+                persist_directory=persist_dir,
+                embedding_function=embedding,
             )
         else:
             self.vectorstore = Chroma.from_documents(
@@ -104,88 +115,119 @@ class RAGEngine:
     def format_docs(self, docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
-    def answer(
-        self,
-        question,
-        rerank_threshold=0.0,
-        rerank_margin_threshold=0.5,
-        embedding_margin_threshold=0.05,
-    ):
-        results = self.vectorstore.similarity_search_with_score(question, k=10)
+    def answer(self, question):
+        results = self.vectorstore.similarity_search_with_score(
+            question,
+            k=10,
+        )
 
         if not results:
             return "I don't know."
 
-        distance = [distance for _, distance in results[:5]]
+        # -------------------------
+        # Stage 1: Embedding confidence
+        # -------------------------
 
-        mean_distance = sum(distance) / len(distance)
+        distances = [distance for _, distance in results[:5]]
+
+        mean_distance = sum(distances) / len(distances)
+
         std_distance = (
-            sum((d - mean_distance) ** 2 for d in distance) / len(distance)
+            sum((distance - mean_distance) ** 2 for distance in distances)
+            / len(distances)
         ) ** 0.5
 
         dynamic_margin_threshold = std_distance
 
-        # -------- Stage 1: Embedding confidence --------
         best_doc, best_distance = results[0]
 
         if len(results) > 1:
             _, second_best_distance = results[1]
+
             embedding_margin = second_best_distance - best_distance
         else:
             embedding_margin = 1.0
 
         if embedding_margin > dynamic_margin_threshold:
             docs = [doc for doc, _ in results[:3]]
+
             context = self.format_docs(docs)
-            formatted_prompt = self.prompt.format(context=context, input=question)
+
+            formatted_prompt = self.prompt.format(
+                context=context,
+                input=question,
+            )
+
             return self.llm.invoke(formatted_prompt)
 
-        # -------- Stage 2: Cross‑Encoder Rerank --------
-        reranked = self.rerank(question, results, top_k=3)
+        # -------------------------
+        # Stage 2: Cross-Encoder reranking
+        # -------------------------
 
-        reranked_scores = [score for _, score in reranked]
+        reranked = self.rerank(
+            question,
+            results,
+            top_k=3,
+        )
 
-        mean_rerank = sum(reranked_scores) / len(reranked_scores)
-        std_rerank = (
-            sum((s - mean_rerank) ** 2 for s in reranked_scores) / len(reranked_scores)
-        ) ** 0.5
-
-        dynamic_rerank_margin_threshold = 0.5 * std_rerank
+        if not reranked:
+            return "I don't know."
 
         best_doc, best_score = reranked[0]
 
-        if best_score < rerank_threshold:
-            return "I don't know."
+        # -------------------------
+        # Rerank margin
+        # -------------------------
 
         if len(reranked) > 1:
             _, second_best_score = reranked[1]
-            rerank_margin = best_score - second_best_score
 
-            # if rerank_margin < dynamic_rerank_margin_threshold:
-            #     return "I don't know."
+            rerank_margin = best_score - second_best_score
+        else:
+            rerank_margin = 1.0
 
         docs = [doc for doc, _ in reranked]
+
         context = self.format_docs(docs)
-        formatted_prompt = self.prompt.format(context=context, input=question)
+
+        formatted_prompt = self.prompt.format(
+            context=context,
+            input=question,
+        )
 
         answer_text = self.llm.invoke(formatted_prompt)
-        pages = [doc.metadata["page"] for doc in docs]
+
+        pages = [doc.metadata["page"] for doc in docs if "page" in doc.metadata]
+
         unique_pages = sorted(set(pages))
 
-        sources = "\n".join(f"- Page {p}" for p in unique_pages)
-        final_output = f"{answer_text}\n\nSources:\n{sources}"
+        sources = "\n".join(f"- Page {page}" for page in unique_pages)
 
-        return final_output
+        return f"{answer_text}\n\n" f"Sources:\n" f"{sources}"
 
     def debug_retrieval(self, question, k=5):
-        results = self.vectorstore.similarity_search_with_score(question, k=k)
+        results = self.vectorstore.similarity_search_with_score(
+            question,
+            k=k,
+        )
 
-        for rank, (doc, distance) in enumerate(results, start=1):
+        for rank, (doc, distance) in enumerate(
+            results,
+            start=1,
+        ):
             print(f"\nResult {rank}")
             print("Distance:", distance)
-            print("Preview:", doc.page_content[:200])
+            print(
+                "Preview:",
+                doc.page_content[:200],
+            )
 
-    def rerank(self, question, docs_with_scores, top_k=3):
+    def rerank(
+        self,
+        question,
+        docs_with_scores,
+        top_k=3,
+    ):
         pairs = [(question, doc.page_content) for doc, _ in docs_with_scores]
 
         scores = self.reranker.predict(pairs)
@@ -194,6 +236,9 @@ class RAGEngine:
 
         reranked = list(zip(docs, scores))
 
-        reranked.sort(key=lambda x: x[1], reverse=True)
+        reranked.sort(
+            key=lambda x: x[1],
+            reverse=True,
+        )
 
         return reranked[:top_k]

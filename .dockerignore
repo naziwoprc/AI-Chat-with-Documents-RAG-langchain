@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+env/
+
+# Git
+.git/
+.gitignore
+
+# Environment files
+.env
+
+# Vector database (نباید داخل ایمیج باشه)
+chroma_db_langchain/
+
+# Large files
+*.log
+*.sqlite
+*.db
+
+# OS files
+.DS_Store
+Thumbs.db
