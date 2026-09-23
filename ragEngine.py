@@ -1,4 +1,4 @@
-from ingestion import load_documents, split_documents
+from ingestion import load_documents, add_metadata, split_documents
 
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
@@ -55,13 +55,15 @@ class SimpleNvidiaLLM:
 
 
 class RAGEngine:
-    def __init__(self, pdf_path, persist_dir, api_key):
-        self.pdf_path = pdf_path
+    def __init__(self, file_path, persist_dir, api_key):
+        self.file_path = file_path
         self.persist_dir = persist_dir
 
         # Load and split documents
-        documents = load_documents(pdf_path)
-        splits = split_documents(documents)
+
+        documents = load_documents(file_path)
+        documents = add_metadata(documents, file_path)
+        documents = split_documents(documents)
 
         # Embedding
         embedding = HuggingFaceEmbeddings(
@@ -80,7 +82,7 @@ class RAGEngine:
             )
         else:
             self.vectorstore = Chroma.from_documents(
-                documents=splits,
+                documents=documents,
                 embedding=embedding,
                 persist_directory=persist_dir,
                 collection_metadata={"hnsw:space": "cosine"},
@@ -197,13 +199,20 @@ class RAGEngine:
 
         answer_text = self.llm.invoke(formatted_prompt)
 
-        pages = [doc.metadata["page"] for doc in docs if "page" in doc.metadata]
+        sources = []
 
-        unique_pages = sorted(set(pages))
+        for doc in docs:
+            source = doc.metadata.get("source", "Unknown source")
 
-        sources = "\n".join(f"- Page {page}" for page in unique_pages)
+            if "page" in doc.metadata:
+                sources.append(f"- {source} (Page {doc.metadata['page'] + 1})")
+            else:
+                sources.append(f"- {source}")
 
-        return f"{answer_text}\n\n" f"Sources:\n" f"{sources}"
+        unique_sources = list(dict.fromkeys(sources))
+        source_text = "\n".join(unique_sources)
+
+        return f"{answer_text}\n\nSources:\n{source_text}"
 
     def debug_retrieval(self, question, k=5):
         results = self.vectorstore.similarity_search_with_score(
@@ -216,11 +225,9 @@ class RAGEngine:
             start=1,
         ):
             print(f"\nResult {rank}")
-            print("Distance:", distance)
-            print(
-                "Preview:",
-                doc.page_content[:200],
-            )
+            print("Preview:", doc.page_content[:200])
+            print("Source:", doc.metadata.get("source"))
+            print("File type:", doc.metadata.get("file_type"))
 
     def rerank(
         self,
