@@ -7,7 +7,7 @@ load_dotenv()
 
 def run_cli():
     engine = RAGEngine(
-        pdf_path="Data/liver_disease.pdf",
+        file_path="Data/test.docx",
         persist_dir="./chroma_db_langchain",
         api_key=os.getenv("NVIDIA_API_KEY"),
     )
