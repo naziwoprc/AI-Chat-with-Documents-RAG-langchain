@@ -23,7 +23,7 @@ class SimpleNvidiaLLM:
         }
 
         payload = {
-            "model": "meta/llama-3.1-70b-instruct",
+            "model": "google/diffusiongemma-26b-a4b-it",
             "messages": [
                 {
                     "role": "user",
@@ -93,16 +93,25 @@ class RAGEngine:
         # LLM
         self.llm = SimpleNvidiaLLM(api_key)
 
+        self.chat_history = []
+
         # Prompt
         self.prompt = ChatPromptTemplate.from_template("""
-            Answer ONLY using the provided context.
-            If the answer is not in the context, say "I don't know."
+            Answer the question using ONLY the provided context.
 
-            Context:
-            {context}
+    Rules:
+    - Answer the specific question that was asked.
+    - Do not replace the question with a related question.
+    - Distinguish between symptoms, causes, risk factors, complications, and other conditions.
+    - Do not describe something as common, frequent, typical, or more prevalent unless the context explicitly supports that claim.
+    - If the context does not contain enough information to answer the question, say "I don't know."
+    - Do not add information that is not supported by the context.
 
-            Question:
-            {input}
+    Context:
+    {context}
+
+    Question:
+    {input}
             """)
 
         self.chain = (
@@ -117,9 +126,39 @@ class RAGEngine:
     def format_docs(self, docs):
         return "\n\n".join(doc.page_content for doc in docs)
 
+    def get_standalone_question(self, question):
+        if not self.chat_history:
+            return question
+        history = "\n".join(
+            f'User: {item["question"]}\nAssistant: {item["answer"]}'
+            for item in self.chat_history
+        )
+        prompt = f"""
+Rewrite the user's latest question as a standalone question using the conversation history.
+
+Rules:
+- Preserve the exact meaning and intent of the latest question.
+- Resolve pronouns and references such as "it", "they", "those", and "which ones".
+- Keep the same topic and category from the previous question.
+- Do not introduce new information or change what the user is asking.
+- If the latest question is already standalone, return it unchanged.
+- Return ONLY the rewritten question.
+
+Conversation history:
+{history}
+
+Latest question:
+{question}
+
+Standalone question:
+"""
+        return self.llm.invoke(prompt)
+
     def answer(self, question):
+        standalone_question = self.get_standalone_question(question)
+
         results = self.vectorstore.similarity_search_with_score(
-            question,
+            standalone_question,
             k=10,
         )
 
@@ -131,7 +170,6 @@ class RAGEngine:
         # -------------------------
 
         distances = [distance for _, distance in results[:5]]
-
         mean_distance = sum(distances) / len(distances)
 
         std_distance = (
@@ -145,59 +183,67 @@ class RAGEngine:
 
         if len(results) > 1:
             _, second_best_distance = results[1]
-
             embedding_margin = second_best_distance - best_distance
         else:
             embedding_margin = 1.0
 
         if embedding_margin > dynamic_margin_threshold:
+
             docs = [doc for doc, _ in results[:3]]
-
-            context = self.format_docs(docs)
-
-            formatted_prompt = self.prompt.format(
-                context=context,
-                input=question,
-            )
-
-            return self.llm.invoke(formatted_prompt)
 
         # -------------------------
         # Stage 2: Cross-Encoder reranking
         # -------------------------
 
-        reranked = self.rerank(
-            question,
-            results,
-            top_k=3,
-        )
-
-        if not reranked:
-            return "I don't know."
-
-        best_doc, best_score = reranked[0]
-
-        # -------------------------
-        # Rerank margin
-        # -------------------------
-
-        if len(reranked) > 1:
-            _, second_best_score = reranked[1]
-
-            rerank_margin = best_score - second_best_score
         else:
-            rerank_margin = 1.0
 
-        docs = [doc for doc, _ in reranked]
+            reranked = self.rerank(
+                standalone_question,
+                results,
+                top_k=3,
+            )
+
+            if not reranked:
+                return "I don't know."
+
+            best_doc, best_score = reranked[0]
+
+            # -------------------------
+            # Rerank margin
+            # -------------------------
+
+            if len(reranked) > 1:
+                _, second_best_score = reranked[1]
+                rerank_margin = best_score - second_best_score
+            else:
+                rerank_margin = 1.0
+
+            docs = [doc for doc, _ in reranked]
+
+        # -------------------------
+        # Generate answer
+        # -------------------------
 
         context = self.format_docs(docs)
 
         formatted_prompt = self.prompt.format(
             context=context,
-            input=question,
+            input=standalone_question,
         )
 
         answer_text = self.llm.invoke(formatted_prompt)
+
+        if answer_text != "I don't know.":
+            self.chat_history.append(
+                {
+                    "question": question,
+                    "answer": answer_text,
+                }
+            )
+
+        # -------------------------
+        # Sources
+        # -------------------------
 
         sources = []
 
@@ -215,8 +261,9 @@ class RAGEngine:
         return f"{answer_text}\n\nSources:\n{source_text}"
 
     def debug_retrieval(self, question, k=5):
+        standalone_question = self.get_standalone_question(question)
         results = self.vectorstore.similarity_search_with_score(
-            question,
+            standalone_question,
             k=k,
         )
 
